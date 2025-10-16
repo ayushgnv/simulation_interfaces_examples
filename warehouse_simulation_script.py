@@ -209,7 +209,7 @@ def main():
         if future.result() and future.result().result.result == Result.RESULT_OK:
             print("UR10 robot spawned successfully")
             # Create joint state publisher for ur10
-            ur10_joint_pub = node.create_publisher(JointState, "/ur10/joint_command", 10)
+            ur10_joint_pub = node.create_publisher(JointState, "/ur10/joint_commands", 10)
         else:
             print("Failed to spawn UR10 robot")
 
@@ -347,7 +347,7 @@ def main():
                     
                     print(f"Dingo robot moved towards table (distance: {distance:.2f}m)")
 
-            # Move the UR10 by sending manual joint commands
+            # Move the UR10 by sending manual joint commands (arm only)
             if ur10_joint_pub:
                 print("Moving UR10 robot joints...")
                 
