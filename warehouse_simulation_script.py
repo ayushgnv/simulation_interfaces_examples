@@ -66,7 +66,7 @@ def main():
         if future.result() and future.result().result.result == Result.RESULT_OK:
             print("Warehouse world loaded successfully")
         else:
-            print("Failed to load warehouse world")
+            print("Failed to load warehouse world: " + future.result().result.error_message)
             return
 
         time.sleep(1.0)
@@ -74,7 +74,7 @@ def main():
         # Load a table prop
         print("Spawning warehouse table...")
         table_req = SpawnEntity.Request()
-        table_req.name = "/World/warehouse_table"
+        table_req.name = "warehouse_table"
         table_req.uri = os.path.join(DEMO_ASSET_PATH, "thor_table/thor_table.usd")
         table_req.allow_renaming = False
         table_req.initial_pose = PoseStamped()
@@ -93,14 +93,14 @@ def main():
         if future.result() and future.result().result.result == Result.RESULT_OK:
             print("Table spawned successfully")
         else:
-            print("Failed to spawn table")
+            print("Failed to spawn table: " + future.result().result.error_message)
 
         time.sleep(0.5)
 
         # Get table state to make all other positions relative to it
         print("Getting table state for relative positioning...")
         req = GetEntityState.Request()
-        req.entity = "/World/warehouse_table"
+        req.entity = "warehouse_table"
         future = get_entity_state_client.call_async(req)
         rclpy.spin_until_future_complete(node, future)
         
@@ -112,6 +112,7 @@ def main():
             print(f"Table found at position: ({table_x:.2f}, {table_y:.2f}, {table_z:.2f})")
         else:
             print("Failed to get table state - cannot proceed with relative positioning")
+            print("Error: " + future.result().result.error_message)
             return
 
         # Load some cubes around the table top (relative to table position) - mix of red and blue
@@ -129,14 +130,14 @@ def main():
         
         for i, (pos, color) in enumerate(cube_configs):
             cube_req = SpawnEntity.Request()
-            cube_req.name = f"/World/{color}_cube"
+            cube_req.name = f"{color}_cube"
             
             # Choose asset based on color
             if color == "blue":
                 cube_req.uri = os.path.join(DEMO_ASSET_PATH, "Collected_blue_block/blue_block.usd")
             else:  # red
                 cube_req.uri = os.path.join(DEMO_ASSET_PATH, "Collected_red_block/red_block.usd")
-                
+
             cube_req.allow_renaming = True
             cube_req.initial_pose = PoseStamped()
             cube_req.initial_pose.header.frame_id = "world"
@@ -153,14 +154,14 @@ def main():
             if future.result() and future.result().result.result == Result.RESULT_OK:
                 print(f"{color.capitalize()} cube spawned successfully at {pos}")
             else:
-                print(f"Failed to spawn {color} cube")
+                print(f"Failed to spawn {color} cube: " + future.result().result.error_message)
 
         time.sleep(0.5)
 
         # Load Dingo robot
         print("Spawning Dingo robot...")
         dingo_req = SpawnEntity.Request()
-        dingo_req.name = "/World/dingo_robot"
+        dingo_req.name = "dingo_robot"
         dingo_req.uri = os.path.join(DEMO_ASSET_PATH, "dingo/dingo_ROS.usd")  # Assuming dingo asset exists
         dingo_req.entity_namespace = "dingo"
         dingo_req.allow_renaming = False
@@ -189,7 +190,7 @@ def main():
         # Load UR10 robot
         print("Spawning UR10 robot...")
         ur10_req = SpawnEntity.Request()
-        ur10_req.name = "/World/ur10_robot"
+        ur10_req.name = "ur10_robot"
         ur10_req.uri = os.path.join(DEMO_ASSET_PATH, "Collected_ur10e_robotiq2f-140_ROS/ur10e_robotiq2f-140_ROS.usd")  # Assuming ur10e asset exists
         ur10_req.entity_namespace = "ur10"
         ur10_req.allow_renaming = False
@@ -199,7 +200,7 @@ def main():
         ur10_req.initial_pose.pose.position.y = float(table_y - 0.64)  # Match table y position
         ur10_req.initial_pose.pose.position.z = float(table_z)  # On top of the table
         quat = yaw_to_quaternion(-1.5708)  # 180 rotation
-        ur10_req.initial_pose.pose.orientation.w = float(quat[0])
+        ur10_req.initial_pose.pose.orientation.w = float(quat[0])   
         ur10_req.initial_pose.pose.orientation.x = float(quat[1])
         ur10_req.initial_pose.pose.orientation.y = float(quat[2])
         ur10_req.initial_pose.pose.orientation.z = float(quat[3])
@@ -225,7 +226,7 @@ def main():
         if future.result() and future.result().result.result == Result.RESULT_OK:
             print("Simulation started successfully")
         else:
-            print("Failed to start simulation")
+            print("Failed to start simulation: " + future.result().result.error_message)
 
         time.sleep(2.0)
 
@@ -236,7 +237,7 @@ def main():
             # Get updated table state (in case it moved)
             print("Getting table state...")
             req = GetEntityState.Request()
-            req.entity = "/World/warehouse_table"
+            req.entity = "warehouse_table"
             future = get_entity_state_client.call_async(req)
             
             rclpy.spin_until_future_complete(node, future)
@@ -249,6 +250,7 @@ def main():
                 print(f"Table position: ({table_x:.2f}, {table_y:.2f}, {table_z:.2f})")
             else:
                 print("Failed to get table state - ending simulation loop")
+                print("Error: " + future.result().result.error_message)
                 break
             
             # Spawn cardboard boxes at different positions based on loop iteration
@@ -266,7 +268,7 @@ def main():
                 [
                     (table_x - 2.0, table_y + 0.5, 0.0, 1.5708),   # West, rotated 90°
                     (table_x + 1.5, table_y - 0.5, 0.0, 0.0),      # East
-                    (table_x - 1.0, table_y + 1.2, 0.0, -0.7854),  # Northwest, rotated -45°
+                    (table_x + 1.8, table_y + 1.2, 0.0, 0.7854),   # Northeast, rotated 45°
                 ],
                 # Iteration 3: Boxes around the north side
                 [
@@ -280,7 +282,7 @@ def main():
             
             for i, (box_x, box_y, box_z, box_yaw) in enumerate(box_positions):
                 box_req = SpawnEntity.Request()
-                box_req.name = f"/World/obstacle_box"
+                box_req.name = "obstacle_box"
                 box_req.uri = os.path.join(DEMO_ASSET_PATH, "Collected_warehouse_with_forklifts/Props/SM_CardBoxA_02.usd")
                 box_req.allow_renaming = True
                 box_req.initial_pose = PoseStamped()
@@ -300,7 +302,7 @@ def main():
                 if future.result() and future.result().result.result == Result.RESULT_OK:
                     print(f"Obstacle box {i+1} spawned at ({box_x:.2f}, {box_y:.2f})")
                 else:
-                    print(f"Failed to spawn obstacle box {i+1}")
+                    print(f"Failed to spawn obstacle box {i+1}: " + future.result().result.error_message)
             
             time.sleep(0.5)
 
@@ -310,7 +312,7 @@ def main():
                 
                 # Calculate direction to table
                 req = GetEntityState.Request()
-                req.entity = "/World/dingo_robot"
+                req.entity = "dingo_robot"
                 future = get_entity_state_client.call_async(req)
                 
                 while not future.done():
@@ -387,7 +389,7 @@ def main():
             from geometry_msgs.msg import Vector3
             
             req = SetEntityState.Request()
-            req.entity = "/World/dingo_robot"
+            req.entity = "dingo_robot"
             
             state = EntityState()
             state.pose = Pose()
@@ -408,7 +410,7 @@ def main():
             if future.result() and future.result().result.result == Result.RESULT_OK:
                 print(f"Dingo moved to new position: ({new_x:.2f}, {new_y:.2f}, yaw: {new_yaw:.2f})")
             else:
-                print("Failed to move Dingo to new position")
+                print("Failed to move Dingo to new position: " + future.result().result.error_message)
 
             time.sleep(0.1)  # Wait between iterations
 
@@ -424,7 +426,7 @@ def main():
         if future.result() and future.result().result.result == Result.RESULT_OK:
             print("Simulation stopped successfully")
         else:
-            print("Failed to stop simulation")
+            print("Failed to stop simulation: " + future.result().result.error_message)
 
         time.sleep(0.5)
 
@@ -437,7 +439,7 @@ def main():
         if future.result() and future.result().result.result == Result.RESULT_OK:
             print("World unloaded successfully")
         else:
-            print("Failed to unload world")
+            print("Failed to unload world: " + future.result().result.error_message)
 
         print("Warehouse simulation completed!")
         
