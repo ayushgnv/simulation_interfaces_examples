@@ -11,5 +11,12 @@ https://github.com/RobotecAI/q_simulation_interfaces
 
 ### Tutorial
 
+Install the demo assets folder to your local machine. 
+
+Run the script: 
+
+`python3 warehouse_simulation_script.py`
+
+
 ### Other resources
 ROSCon 2025 talk introducing the standard and resources
