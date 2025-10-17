@@ -3,6 +3,9 @@ from simulation_interfaces.srv import GetEntityState, SetEntityState, SpawnEntit
 from simulation_interfaces.msg import Result, SimulationState
 from geometry_msgs.msg import Twist, PoseStamped, Pose, Point, Quaternion, Vector3
 from sensor_msgs.msg import JointState
+from rclpy.action import ActionClient
+from control_msgs.msg import JointTolerance
+from builtin_interfaces.msg import Duration
 from std_msgs.msg import Header
 import argparse
 import os
@@ -182,7 +185,7 @@ def spawn_table_and_get_pose(node, spawn_entity_client, get_entity_state_client)
 
 
 def spawn_cubes_around_table(node, spawn_entity_client, table_x, table_y, table_z):
-    """Spawn cubes around the table using provided table position."""
+    """Spawn cubes around the table using the provided table position."""
     logger = logging.getLogger(__name__)
     logger.info("Spawning cubes around table...")
     cube_configs = [
@@ -244,11 +247,11 @@ def spawn_dingo(node, spawn_entity_client):
 
 
 def spawn_ur10(node, spawn_entity_client, table_x, table_y, table_z):
-    """Spawn the UR10 robot and return a joint command publisher or None."""
+    """Spawn the UR10 robot on the table using the provided table position."""
     logger = logging.getLogger(__name__)
     logger.info("Spawning UR10 robot...")
     position = Point(x=float(table_x), y=float(table_y - 0.64), z=float(table_z))
-    orientation = yaw_to_quaternion(-1.5708)
+    orientation = yaw_to_quaternion(1.5708)
     success = spawn_entity(
         node,
         spawn_entity_client,
@@ -261,11 +264,8 @@ def spawn_ur10(node, spawn_entity_client, table_x, table_y, table_z):
     )
     if success:
         logger.info("UR10 robot spawned successfully")
-        # Create joint state publisher for ur10
-        return node.create_publisher(JointState, "/ur10/joint_commands", 10)
     else:
         logger.error("Failed to spawn UR10 robot")
-        return None
 
 
 def spawn_obstacle_boxes(node, spawn_entity_client, box_positions):
@@ -331,14 +331,16 @@ def move_dingo_towards_table(node, get_entity_state_client, dingo_cmd_vel_pub, t
         logger.error("Failed to query Dingo state: %s", future.result().result.error_message)
 
 
-def move_ur10_joints(node, ur10_joint_pub, loop_iteration):
+def move_ur10_joints(node, loop_iteration, sim_backend):
     """Publish joint positions for UR10 for the given iteration."""
     logger = logging.getLogger(__name__)
     logger.info("Moving UR10 robot joints...")
-    joint_cmd = JointState()
-    joint_cmd.header = Header()
-    joint_cmd.header.stamp = node.get_clock().now().to_msg()
-    joint_cmd.name = [
+    joint_positions_by_iteration = [
+        [0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0],
+        [0.7854, -1.0472, 0.7854, -0.7854, -1.5708, 0.5236],
+        [-0.5236, -2.0944, 2.0944, -2.0944, -1.5708, -0.7854],
+    ]
+    joint_names = [
         "shoulder_pan_joint",
         "shoulder_lift_joint",
         "elbow_joint",
@@ -346,18 +348,68 @@ def move_ur10_joints(node, ur10_joint_pub, loop_iteration):
         "wrist_2_joint",
         "wrist_3_joint",
     ]
-    joint_positions_by_iteration = [
-        [0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0],
-        [0.7854, -1.0472, 0.7854, -0.7854, -1.5708, 0.5236],
-        [-0.5236, -2.0944, 2.0944, -2.0944, -1.5708, -0.7854],
-    ]
-    joint_cmd.position = joint_positions_by_iteration[loop_iteration]
+    positions = joint_positions_by_iteration[loop_iteration]
+    if sim_backend == "isaac":
+        move_ur10_joints_topic(node, joint_names, positions)
+    elif sim_backend == "o3de":
+        # o3de adds namespace to joint names
+        joint_names = [f"ur10/{name}" for name in joint_names]
+        move_ur10_joints_action(node, joint_names, positions)
+    else:
+        logger.error("Unknown simulation backend: %s", sim_backend)
+
+
+def move_ur10_joints_topic(node, joint_names, positions):
+    """Move UR10 joints using JointState publisher."""
+    logger = logging.getLogger(__name__)
+    ur10_joint_pub = node.create_publisher(JointState, "/ur10/joint_commands", 10)
+    joint_cmd = JointState()
+    joint_cmd.header = Header()
+    joint_cmd.header.stamp = node.get_clock().now().to_msg()
+    joint_cmd.name = joint_names
+    joint_cmd.position = positions
     for _ in range(10):
         ur10_joint_pub.publish(joint_cmd)
         time.sleep(0.2)
-    logger.info("UR10 joint positions updated")
+    logger.info("UR10 joint positions updated (topic)")
 
 
+def move_ur10_joints_action(node, joint_names, positions):
+    """Move UR10 joints using FollowJointTrajectory action."""
+    logger = logging.getLogger(__name__)
+    from control_msgs.action import FollowJointTrajectory
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    action_client = ActionClient(node, FollowJointTrajectory, "/ur10/joint_trajectory_controller/follow_joint_trajectory")
+    while not action_client.wait_for_server(timeout_sec=1.0):
+        logging.info("Waiting for action server...")
+    
+    goal_msg = FollowJointTrajectory.Goal()
+    trajectory = JointTrajectory()
+    trajectory.joint_names = joint_names
+    point = JointTrajectoryPoint()
+    point.positions = positions
+    point.velocities = [0.0] * len(joint_names)
+    point.effort = [0.0] * len(joint_names)
+    point.time_from_start = Duration(sec=1, nanosec=0)
+    trajectory.points.append(point)
+    goal_tolerance = [JointTolerance(position=0.01) for _ in range(2)]
+    goal_msg = FollowJointTrajectory.Goal()
+    goal_msg.trajectory = trajectory
+    goal_msg.goal_tolerance = goal_tolerance
+
+    future = action_client.send_goal_async(goal_msg)
+    rclpy.spin_until_future_complete(node, future)
+    goal_handle = future.result()
+    if not goal_handle.accepted:
+        logging.error("Goal rejected")
+        return
+
+    result_future = goal_handle.get_result_async()
+    rclpy.spin_until_future_complete(node, result_future)
+    result = result_future.result().result
+    logger.info("UR10 trajectory executed (action): %s", result)
+    
+        
 def move_entity_to_location(node, set_entity_state_client, entity, target_x, target_y, target_yaw=1.5708):
     """Set an entity's pose (position + orientation) via SetEntityState service.
 
@@ -415,12 +467,11 @@ def run_simulation_loop(
     spawn_entity_client,
     get_entity_state_client,
     set_entity_state_client,
-    unload_world_client,
     dingo_cmd_vel_pub,
-    ur10_joint_pub,
     table_x,
     table_y,
     table_z,
+    sim_backend,
 ):
     """Run the main simulation loop which spawns obstacle boxes, moves robots and handles timing."""
     logger = logging.getLogger(__name__)
@@ -482,8 +533,7 @@ def run_simulation_loop(
                 node, get_entity_state_client, dingo_cmd_vel_pub, table_x, table_y
             )
 
-        if ur10_joint_pub:
-            move_ur10_joints(node, ur10_joint_pub, loop_iteration)
+        move_ur10_joints(node, loop_iteration, sim_backend)
         time.sleep(0.1)
 
         # Move (set) the Dingo to a specific location relative to the table
@@ -495,22 +545,6 @@ def run_simulation_loop(
 
     logger.info("Simulation loop completed!")
 
-    # Stop simulation
-    stopped = set_simulation_state(node, set_state_client, SimulationState.STATE_STOPPED)
-    if stopped:
-        logger.info("Simulation stopped successfully")
-    else:
-        logger.error("Failed to stop simulation")
-
-    time.sleep(0.5)
-
-    # Unload world
-    if unload_world(node, unload_world_client):
-        logger.info("World unloaded successfully")
-    else:
-        logger.error("Failed to unload world")
-
-    logger.info("Warehouse simulation completed!")
     return True
 
 
@@ -519,7 +553,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     # Parse command-line args to allow runtime selection of asset backend
     parser = argparse.ArgumentParser()
-    parser.add_argument("--asset-backend", choices=["isaac", "o3de"], default="isaac",
+    parser.add_argument("--sim-backend", choices=["isaac", "o3de"], default="isaac",
                         help="Choose which asset backend to use (isaac or o3de).")
     args, unknown = parser.parse_known_args()
 
@@ -527,7 +561,7 @@ def main():
     rclpy.init()
 
     # If Isaac backend requested, map ACTIVE URIs to USD files under DEMO_ASSET_PATH
-    if args.asset_backend == "isaac":
+    if args.sim_backend == "isaac":
         if not DEMO_ASSET_PATH:
             raise RuntimeError("DEMO_ASSET_PATH must be set to use IsaacSim asset backend")
         # Override ACTIVE_* URIs to point to USD files
@@ -539,8 +573,7 @@ def main():
         ACTIVE_DINGO_URI = os.path.join(DEMO_ASSET_PATH, "dingo/dingo_ROS.usd")
         ACTIVE_UR10_URI = os.path.join(DEMO_ASSET_PATH, "Collected_ur10e_robotiq2f-140_ROS/ur10e_robotiq2f-140_ROS.usd")
         ACTIVE_CARDBOARD_URI = os.path.join(DEMO_ASSET_PATH, "Collected_warehouse_with_forklifts/Props/SM_CardBoxA_02.usd")
-
-    if args.asset_backend == "o3de":
+    elif args.sim_backend == "o3de":
         ACTIVE_WORLD_URI = "levels/warehouse/warehouse.spawnable"
         ACTIVE_TABLE_URI = "product_asset:///assets/props/thortable/thortable.spawnable"
         ACTIVE_BLUE_CUBE_URI = "product_asset:///assets/props/collectedblocks/basicblock_blue.spawnable"
@@ -548,6 +581,8 @@ def main():
         ACTIVE_DINGO_URI = "product_asset:///assets/dingo/dingo-d.spawnable"
         ACTIVE_UR10_URI = "product_asset:///prefabs/ur10-with-fingers.spawnable"
         ACTIVE_CARDBOARD_URI = "product_asset:///assets/props/sm_cardboxa_02.spawnable"
+    else:
+        raise RuntimeError(f"Unknown simulation backend: {args.sim_backend}")
         
     # Initialize main ROS node
     node = rclpy.create_node("warehouse_simulation")
@@ -587,8 +622,8 @@ def main():
         dingo_cmd_vel_pub = spawn_dingo(node, spawn_entity_client)
         time.sleep(0.5)
 
-        # Spawn UR10 robot (returns joint command publisher or None)
-        ur10_joint_pub = spawn_ur10(node, spawn_entity_client, table_x, table_y, table_z)
+        # Spawn UR10 robot
+        spawn_ur10(node, spawn_entity_client, table_x, table_y, table_z)
         time.sleep(1.0)
 
         # Run the main simulation loop (spawns obstacles, moves robots, stops and unloads)
@@ -598,13 +633,30 @@ def main():
             spawn_entity_client,
             get_entity_state_client,
             set_entity_state_client,
-            unload_world_client,
             dingo_cmd_vel_pub,
-            ur10_joint_pub,
             table_x,
             table_y,
             table_z,
+            sim_backend=args.sim_backend,
         )
+        
+        # Stop simulation
+        logger = logging.getLogger(__name__)
+        stopped = set_simulation_state(node, set_state_client, SimulationState.STATE_STOPPED)
+        if stopped:
+            logger.info("Simulation stopped successfully")
+        else:
+            logger.error("Failed to stop simulation")
+
+        time.sleep(0.5)
+
+        # Unload world
+        if unload_world(node, unload_world_client):
+            logger.info("World unloaded successfully")
+        else:
+            logger.error("Failed to unload world")
+            
+        logger.info("Warehouse simulation completed!")
         if not success:
             logging.getLogger(__name__).error("Simulation loop failed or stopped early")
         
