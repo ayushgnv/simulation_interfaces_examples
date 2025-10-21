@@ -1,12 +1,12 @@
 import rclpy
-from simulation_interfaces.srv import GetEntityState, SetEntityState, SpawnEntity, DeleteEntity, SetSimulationState, ResetSimulation, GetEntityInfo, LoadWorld, UnloadWorld
+from simulation_interfaces.srv import GetEntityState, SetEntityState, SpawnEntity, DeleteEntity, SetSimulationState, ResetSimulation, GetEntityInfo, LoadWorld, UnloadWorld, StepSimulation
 from simulation_interfaces.msg import Result, SimulationState
 from geometry_msgs.msg import Twist, PoseStamped, Pose, Point, Quaternion, Vector3
 from sensor_msgs.msg import JointState
 from rclpy.action import ActionClient
 from control_msgs.msg import JointTolerance
 from builtin_interfaces.msg import Duration
-from std_msgs.msg import Header
+from std_msgs.msg import Float64MultiArray, Header
 import argparse
 import os
 import numpy as np
@@ -35,22 +35,34 @@ def yaw_to_quaternion(yaw):
     return q
 
 
-def setup_service_clients(node):
+def setup_service_clients(node, sim_backend):
     """Create and wait for essential service clients, return them as a tuple."""
+    load_world_client = None
+    unload_world_client = None
+    if sim_backend != "gazebo":
+        load_world_client = node.create_client(LoadWorld, 'load_world')
+        unload_world_client = node.create_client(UnloadWorld, 'unload_world')
+
     logger = logging.getLogger(__name__)
-    set_state_client = node.create_client(SetSimulationState, 'set_simulation_state')
-    reset_client = node.create_client(ResetSimulation, 'reset_simulation')
-    load_world_client = node.create_client(LoadWorld, 'load_world')
-    unload_world_client = node.create_client(UnloadWorld, 'unload_world')
-    spawn_entity_client = node.create_client(SpawnEntity, 'spawn_entity')
-    get_entity_state_client = node.create_client(GetEntityState, 'get_entity_state')
-    set_entity_state_client = node.create_client(SetEntityState, 'set_entity_state')
-    get_entity_info_client = node.create_client(GetEntityInfo, 'get_entity_info')
+    service_prefix_str =''
+    if sim_backend == "gazebo":
+        service_prefix_str = '/gz_server/'
+    set_state_client = node.create_client(SetSimulationState, service_prefix_str + 'set_simulation_state')
+    reset_client = node.create_client(ResetSimulation, service_prefix_str + 'reset_simulation')
+    spawn_entity_client = node.create_client(SpawnEntity, service_prefix_str + 'spawn_entity')
+    get_entity_state_client = node.create_client(GetEntityState, service_prefix_str + 'get_entity_state')
+    set_entity_state_client = node.create_client(SetEntityState, service_prefix_str + 'set_entity_state')
+    get_entity_info_client = node.create_client(GetEntityInfo, service_prefix_str + 'get_entity_info')
+    step_sim_client = node.create_client(StepSimulation, service_prefix_str + 'step_simulation')
+
     logger.info("Waiting for simulation services...")
     while not set_state_client.wait_for_service(timeout_sec=1.0):
         logger.debug("set_simulation_state service not available, waiting...")
-    while not load_world_client.wait_for_service(timeout_sec=1.0):
-        logger.debug("load_world service not available, waiting...")
+    logger.info("Waiting for simulation services2...")
+    if sim_backend != "gazebo":
+        while not load_world_client.wait_for_service(timeout_sec=1.0):
+            logger.debug("load_world service not available, waiting...")
+    logger.info("Waiting for simulation services3...")
     while not spawn_entity_client.wait_for_service(timeout_sec=1.0):
         logger.debug("spawn_entity service not available, waiting...")
 
@@ -64,6 +76,7 @@ def setup_service_clients(node):
         get_entity_state_client,
         set_entity_state_client,
         get_entity_info_client,
+        step_sim_client,
     )
 
 
@@ -208,7 +221,7 @@ def spawn_cubes_around_table(node, spawn_entity_client, table_x, table_y, table_
         success = spawn_entity(
             node,
             spawn_entity_client,
-            name=f"{color}_cube",
+            name=f"{color}_cube_{i}",
             uri=uri,
             position=position_vec,
             orientation=orientation_quat,
@@ -220,6 +233,48 @@ def spawn_cubes_around_table(node, spawn_entity_client, table_x, table_y, table_
         else:
             logger.error("Failed to spawn %s cube at %s", color, pos)
 
+def move_cubes_and_step_sim(node, set_state_client, set_entity_state_client, step_sim_client, table_x, table_y, table_z):
+    """Moving cubes above the table and stepping simulation for 1 second."""
+    logger = logging.getLogger(__name__)
+    logger.info("Pausing, moving cubes above the table, and stepping simulation...")
+
+    paused = set_simulation_state(node, set_state_client, SimulationState.STATE_PAUSED)
+    if paused:
+        logger.info("Simulation paused successfully")
+    else:
+        logger.error("Failed to paused simulation")
+
+    time.sleep(0.5)
+
+    cube_configs = [
+        ((table_x + 0.1, table_y + 0.1, table_z + 0.1), "blue"),
+        ((table_x - 0.1, table_y + 0.1, table_z + 0.1), "red"),
+        ((table_x + 0.1, table_y - 0.1, table_z + 0.1), "red"),
+        ((table_x - 0.1, table_y - 0.1, table_z + 0.1), "blue"),
+        ((table_x, table_y, table_z + 0.1), "blue"),
+        ((table_x + 0.2, table_y, table_z + 0.1), "red"),
+        ((table_x - 0.2, table_y, table_z + 0.1), "red"),
+    ]
+
+    for i, (pos, color) in enumerate(cube_configs):
+        if color == "blue":
+            uri = ACTIVE_BLUE_CUBE_URI
+        else:
+            uri = ACTIVE_RED_CUBE_URI
+
+        z_pos = pos[2] + i * 0.05
+        move_entity_to_location(node, set_entity_state_client, f'{color}_cube_{i}', pos[0], pos[1], z_pos, 0.0)
+
+    time.sleep(0.5)
+
+    req = StepSimulation.Request()
+    req.steps = 1000
+    future = step_sim_client.call_async(req)
+    rclpy.spin_until_future_complete(node, future)
+    if future.result() and future.result().result.result == Result.RESULT_OK:
+        logger.info("Successfully stepped simulation")
+    else:
+        logger.info("Failed to step simulation")
 
 def spawn_dingo(node, spawn_entity_client):
     """Spawn the Dingo robot and return a cmd_vel publisher or None."""
@@ -355,6 +410,8 @@ def move_ur10_joints(node, loop_iteration, sim_backend):
         # o3de adds namespace to joint names
         joint_names = [f"ur10/{name}" for name in joint_names]
         move_ur10_joints_action(node, joint_names, positions)
+    if sim_backend == "gazebo":
+        move_ur10_joint_array_topic(node, joint_names, positions)
     else:
         logger.error("Unknown simulation backend: %s", sim_backend)
 
@@ -373,6 +430,16 @@ def move_ur10_joints_topic(node, joint_names, positions):
         time.sleep(0.2)
     logger.info("UR10 joint positions updated (topic)")
 
+def move_ur10_joint_array_topic(node, joint_names, positions):
+    """Move UR10 joints using Float64MultiArray publisher."""
+    logger = logging.getLogger(__name__)
+    ur10_joint_pub = node.create_publisher(Float64MultiArray, "/ur10/joint_commands", 10)
+    joint_cmd = Float64MultiArray()
+    joint_cmd.data = positions
+    for _ in range(10):
+        ur10_joint_pub.publish(joint_cmd)
+        time.sleep(0.2)
+    logger.info("UR10 joint positions updated (topic)")
 
 def move_ur10_joints_action(node, joint_names, positions):
     """Move UR10 joints using FollowJointTrajectory action."""
@@ -410,7 +477,7 @@ def move_ur10_joints_action(node, joint_names, positions):
     logger.info("UR10 trajectory executed (action): %s", result)
     
         
-def move_entity_to_location(node, set_entity_state_client, entity, target_x, target_y, target_yaw=1.5708):
+def move_entity_to_location(node, set_entity_state_client, entity, target_x, target_y, target_z, target_yaw=1.5708):
     """Set an entity's pose (position + orientation) via SetEntityState service.
 
     Args:
@@ -427,7 +494,7 @@ def move_entity_to_location(node, set_entity_state_client, entity, target_x, tar
     req.entity = entity
     state = EntityState()
     state.pose = Pose()
-    state.pose.position = Point(x=float(target_x), y=float(target_y), z=float(0.0))
+    state.pose.position = Point(x=float(target_x), y=float(target_y), z=float(target_z))
     quat = yaw_to_quaternion(target_yaw)
     state.pose.orientation = quat
     state.twist = Twist()
@@ -437,7 +504,7 @@ def move_entity_to_location(node, set_entity_state_client, entity, target_x, tar
     future = set_entity_state_client.call_async(req)
     rclpy.spin_until_future_complete(node, future)
     if future.result() and future.result().result.result == Result.RESULT_OK:
-        logger.info("%s moved to new position: (%.2f, %.2f, yaw: %.2f)", entity, target_x, target_y, target_yaw)
+        logger.info("%s moved to new position: (%.2f, %.2f, %.2f, yaw: %.2f)", entity, target_x, target_y, target_z, target_yaw)
         return True
     else:
         logger.error("Failed to move %s to new position: %s", entity, future.result().result.error_message)
@@ -539,8 +606,9 @@ def run_simulation_loop(
         # Move (set) the Dingo to a specific location relative to the table
         new_x = table_x - 3.0
         new_y = table_y - 2.5
+        new_z = 0.0
         new_yaw = 1.5708
-        move_entity_to_location(node, set_entity_state_client, 'dingo_robot', new_x, new_y, new_yaw)
+        move_entity_to_location(node, set_entity_state_client, 'dingo_robot', new_x, new_y, new_z, new_yaw)
         time.sleep(0.1)
 
     logger.info("Simulation loop completed!")
@@ -553,8 +621,8 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     # Parse command-line args to allow runtime selection of asset backend
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sim-backend", choices=["isaac", "o3de"], default="isaac",
-                        help="Choose which asset backend to use (isaac or o3de).")
+    parser.add_argument("--sim-backend", choices=["isaac", "o3de", "gazebo"], default="isaac",
+                        help="Choose which asset backend to use (isaac, o3de or gazebo).")
     args, unknown = parser.parse_known_args()
 
     # Initialize ROS client library
@@ -581,6 +649,13 @@ def main():
         ACTIVE_DINGO_URI = "product_asset:///assets/dingo/dingo-d.spawnable"
         ACTIVE_UR10_URI = "product_asset:///prefabs/ur10-with-fingers.spawnable"
         ACTIVE_CARDBOARD_URI = "product_asset:///assets/props/sm_cardboxa_02.spawnable"
+    elif args.sim_backend == "gazebo":
+        ACTIVE_TABLE_URI = os.path.join(DEMO_ASSET_PATH, "thor_table")
+        ACTIVE_BLUE_CUBE_URI = os.path.join(DEMO_ASSET_PATH, "blue_block")
+        ACTIVE_RED_CUBE_URI = os.path.join(DEMO_ASSET_PATH, "red_block")
+        ACTIVE_DINGO_URI = os.path.join(DEMO_ASSET_PATH, "dingo_d")
+        ACTIVE_UR10_URI = os.path.join(DEMO_ASSET_PATH, "ur10")
+        ACTIVE_CARDBOARD_URI = os.path.join(DEMO_ASSET_PATH, "cardboard_box")
     else:
         raise RuntimeError(f"Unknown simulation backend: {args.sim_backend}")
         
@@ -602,12 +677,14 @@ def main():
             get_entity_state_client,
             set_entity_state_client,
             get_entity_info_client,
-        ) = setup_service_clients(node)
+            step_sim_client,
+        ) = setup_service_clients(node, sim_backend=args.sim_backend)
 
         # Load the warehouse world (explicit URI)
-        if not load_warehouse_world(node, load_world_client, ACTIVE_WORLD_URI):
-            return
-        time.sleep(1.0)
+        if args.sim_backend != "gazebo":
+            if not load_warehouse_world(node, load_world_client, ACTIVE_WORLD_URI):
+                return
+            time.sleep(1.0)
 
         # Spawn table and get its pose
         table_x, table_y, table_z = spawn_table_and_get_pose(node, spawn_entity_client, get_entity_state_client)
@@ -624,6 +701,11 @@ def main():
 
         # Spawn UR10 robot
         spawn_ur10(node, spawn_entity_client, table_x, table_y, table_z)
+        time.sleep(2.0)
+
+        # Move box and set entity state
+        move_cubes_and_step_sim(node, set_state_client, set_entity_state_client, step_sim_client, table_x, table_y, table_z)
+
         time.sleep(1.0)
 
         # Run the main simulation loop (spawns obstacles, moves robots, stops and unloads)
@@ -651,10 +733,11 @@ def main():
         time.sleep(0.5)
 
         # Unload world
-        if unload_world(node, unload_world_client):
-            logger.info("World unloaded successfully")
-        else:
-            logger.error("Failed to unload world")
+        if args.sim_backend != "gazebo":
+            if unload_world(node, unload_world_client):
+                logger.info("World unloaded successfully")
+            else:
+                logger.error("Failed to unload world")
             
         logger.info("Warehouse simulation completed!")
         if not success:
